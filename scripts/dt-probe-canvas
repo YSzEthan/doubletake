@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Print the receiver's video canvas (WxH), cached per target.
+# Usage: dt-probe-canvas [-f] [-t SEC] TARGET
+# Env:   DOUBLETAKE       doubletake binary (default: doubletake in PATH)
+#        DOUBLETAKE_CODE  pairing PIN/password for a first-time connection
+set -euo pipefail
+
+force=0 secs=20
+while getopts ft: opt; do
+	case $opt in
+	f) force=1 ;;
+	t) secs=$OPTARG ;;
+	*) exit 2 ;;
+	esac
+done
+shift $((OPTIND - 1))
+[[ $# -eq 1 ]] || { echo "usage: dt-probe-canvas [-f] [-t SEC] TARGET" >&2; exit 2; }
+target=$1
+
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/dt-extend/$target.canvas
+if [[ $force -eq 0 && -s $cache ]]; then
+	cat "$cache"
+	exit 0
+fi
+
+rc=0
+res=$(timeout "$secs" "${DOUBLETAKE:-doubletake}" -probe-canvas -target "$target" </dev/null) || rc=$?
+case $rc in
+0) ;;
+124) echo "dt-probe-canvas: timed out after ${secs}s" >&2; exit 1 ;;
+127) echo "dt-probe-canvas: doubletake not found (set DOUBLETAKE=/path)" >&2; exit 1 ;;
+*) echo "dt-probe-canvas: probe failed (exit $rc)" >&2; exit 1 ;;
+esac
+[[ $res =~ ^[0-9]+x[0-9]+$ ]] || { echo "dt-probe-canvas: unexpected output: $res" >&2; exit 1; }
+
+mkdir -p "${cache%/*}"
+printf '%s\n' "$res" >"$cache.tmp"
+mv "$cache.tmp" "$cache"
+echo "$res"
