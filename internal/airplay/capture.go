@@ -40,6 +40,7 @@ type CaptureConfig struct {
 
 	X11WindowID   uint64
 	X11WindowName string
+	X11Output     string // xrandr output to crop to; empty selects the primary
 
 	ShowCursor bool // show the mouse cursor in the captured video (Wayland and X11)
 
@@ -224,7 +225,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		return nil, err
 	}
 	kind := capturePreparationX11
-	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
+	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "" || cfg.X11Output != "") && os.Getenv("DISPLAY") != "" {
 		kind = capturePreparationX11
 	} else if os.Getenv("WAYLAND_DISPLAY") != "" {
 		kind = capturePreparationWayland
@@ -268,6 +269,11 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		}
 		if err := probeX11CaptureSource(ctx, os.Getenv("DISPLAY"), cfg); err != nil {
 			return nil, err
+		}
+		if cfg.X11Output != "" {
+			if _, _, _, _, err := detectX11Monitor(ctx, os.Getenv("DISPLAY"), cfg.X11Output); err != nil {
+				return nil, err
+			}
 		}
 		return preparation, nil
 	}
@@ -1700,12 +1706,18 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 		ximageSrcArgs = append(ximageSrcArgs, fmt.Sprintf("xname=%s", cfg.X11WindowName))
 		dbg("[CAPTURE] capturing X11 window name=%q", cfg.X11WindowName)
 	} else {
-		// Detect primary monitor geometry — ximagesrc captures the full X screen
-		// (all monitors combined). On multi-monitor setups this wastes CPU on pixels
-		// we don't need, so crop to the primary monitor. The encoded resolution is
-		// then the primary monitor's native resolution (no rescaling).
-		startX, startY, endX, endY := detectPrimaryMonitor(startupCtx, display)
-		if endX > startX && endY > startY {
+		// Detect monitor geometry — ximagesrc captures the full X screen (all
+		// monitors combined). On multi-monitor setups this wastes CPU on pixels we
+		// don't need, so crop to the requested output, or the primary one. The
+		// encoded resolution is then that monitor's native resolution.
+		startX, startY, endX, endY, err := detectX11Monitor(startupCtx, display, cfg.X11Output)
+		if err != nil && cfg.X11Output != "" {
+			cancel()
+			return nil, err
+		}
+		if err != nil {
+			dbg("[CAPTURE] %v, skipping monitor crop", err)
+		} else {
 			ximageSrcArgs = append(ximageSrcArgs,
 				fmt.Sprintf("startx=%d", startX),
 				fmt.Sprintf("starty=%d", startY),
@@ -1856,57 +1868,49 @@ func (sc *ScreenCapture) Stop() {
 	})
 }
 
-// detectPrimaryMonitor queries xrandr to find the primary monitor's geometry.
-// Returns (startX, startY, endX, endY) bounding the primary monitor, where
-// endX = startX + monitor_width and endY = startY + monitor_height. If
-// detection fails it returns all zeros, meaning no cropping should be applied.
-func detectPrimaryMonitor(ctx context.Context, display string) (startX, startY, endX, endY int) {
-	// Run xrandr to get connected outputs with geometry
+// detectX11Monitor queries xrandr for the geometry of the named output, or of
+// the primary monitor when name is empty. It returns (startX, startY, endX,
+// endY), where endX = startX + width and endY = startY + height.
+func detectX11Monitor(ctx context.Context, display, name string) (startX, startY, endX, endY int, err error) {
 	out, err := exec.CommandContext(normalizeContext(ctx), "xrandr", "--display", display, "--query").Output()
 	if err != nil {
-		dbg("[CAPTURE] xrandr failed: %v, skipping monitor crop", err)
-		return 0, 0, 0, 0
+		return 0, 0, 0, 0, fmt.Errorf("xrandr failed: %w", err)
 	}
+	startX, startY, endX, endY, err = selectXrandrMonitor(string(out), name)
+	if err == nil {
+		dbg("[CAPTURE] monitor %q: %dx%d at +%d+%d", name, endX-startX, endY-startY, startX, startY)
+	}
+	return startX, startY, endX, endY, err
+}
 
-	// Parse lines like: "DP-3 connected primary 1920x1080+0+0"
-	// or "DP-1 connected 1920x1080+1920+0"
-	// Format: <name> connected [primary] <W>x<H>+<X>+<Y>
-	var px, py, pw, ph int
-	var found bool
-	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, " connected") {
+// selectXrandrMonitor picks an active output from `xrandr --query` output.
+// Lines look like "DP-1 connected [primary] <W>x<H>+<X>+<Y> ..."; outputs that
+// are connected but disabled have no geometry and are skipped. An empty name
+// selects the primary output, falling back to the first active one.
+func selectXrandrMonitor(xrandrOut, name string) (startX, startY, endX, endY int, err error) {
+	var active []string
+	var first [4]int
+	for _, line := range strings.Split(xrandrOut, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[1] != "connected" {
 			continue
 		}
-		// Try primary first
-		if strings.Contains(line, " primary ") {
-			if x, y, w, h, ok := parseXrandrGeometry(line); ok {
-				px, py, pw, ph = x, y, w, h
-				found = true
-				break
-			}
+		x, y, w, h, ok := parseXrandrGeometry(line)
+		if !ok || w <= 0 || h <= 0 {
+			continue
 		}
-	}
-	// If no primary found, use the first connected output
-	if !found {
-		for _, line := range strings.Split(string(out), "\n") {
-			if !strings.Contains(line, " connected") {
-				continue
-			}
-			if x, y, w, h, ok := parseXrandrGeometry(line); ok {
-				px, py, pw, ph = x, y, w, h
-				found = true
-				break
-			}
+		if f[0] == name || (name == "" && f[2] == "primary") {
+			return x, y, x + w, y + h, nil
 		}
+		if len(active) == 0 {
+			first = [4]int{x, y, x + w, y + h}
+		}
+		active = append(active, f[0])
 	}
-
-	if !found || pw <= 0 || ph <= 0 {
-		dbg("[CAPTURE] couldn't parse xrandr output, skipping monitor crop")
-		return 0, 0, 0, 0
+	if name == "" && len(active) > 0 {
+		return first[0], first[1], first[2], first[3], nil
 	}
-
-	dbg("[CAPTURE] primary monitor: %dx%d at +%d+%d", pw, ph, px, py)
-	return px, py, px + pw, py + ph
+	return 0, 0, 0, 0, fmt.Errorf("x11 output %q not found or not active (active: %s)", name, strings.Join(active, ", "))
 }
 
 // parseXrandrGeometry extracts the X/Y offset and width/height from an xrandr
@@ -1920,7 +1924,7 @@ func parseXrandrGeometry(line string) (xOffset, yOffset, width, height int, ok b
 			continue
 		}
 		w, err := strconv.Atoi(parts[0])
-		if err != nil || w < 640 {
+		if err != nil {
 			continue
 		}
 		rest := parts[1] // e.g. "1080+0+0"

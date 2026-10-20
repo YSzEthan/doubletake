@@ -79,6 +79,7 @@ func main() {
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
 	x11WindowID := flag.String("x11-window-id", "", "X11 window id to capture, decimal or 0xhex")
 	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
+	x11Output := flag.String("x11-output", "", "X11 output (xrandr name) to capture, e.g. DP-1; default is the primary output")
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
@@ -345,6 +346,7 @@ func main() {
 		VideoCodec:    airplay.VideoCodec(*videoCodec),
 		X11WindowID:   xid,
 		X11WindowName: *x11WindowName,
+		X11Output:     *x11Output,
 		ShowCursor:    !*noCursor,
 	}
 	if *testMode {
