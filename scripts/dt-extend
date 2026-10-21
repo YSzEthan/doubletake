@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Extend the X11 desktop onto an AirPlay receiver and undo it on exit.
+# Usage: dt-extend [-o OUTPUT] [-r REF] TARGET
+#   -o OUT  force-connected output to use (default DP-1)
+#   -r REF  real output it is placed next to (default HDMI-1)
+# Env:    DOUBLETAKE       doubletake binary (default: doubletake in PATH)
+#         DOUBLETAKE_CODE  pairing PIN/password; without it a first-time
+#                          pairing asks on the terminal
+#
+# Steps: dt-status on, enable OUT, dt-res, dt-pos apply, run doubletake
+# -x11-output OUT. On any exit (normal, Ctrl+C, TERM, HUP, doubletake dying)
+# it saves the side, stops doubletake, turns OUT off, restores primary and
+# writes status back to detect. The status write uses sudo -n there, so when
+# there is no terminal to ask for a password (closed terminal, menu launch)
+# status stays "on" until #7 lets it run without one.
+#
+# kill -9 cannot be trapped. Undo by hand:
+#   xrandr --output DP-1 --off; echo detect | sudo tee /sys/class/drm/card*-DP-1/status
+set -euo pipefail
+
+out=DP-1 ref=HDMI-1
+while getopts o:r: opt; do
+	case $opt in
+	o) out=$OPTARG ;;
+	r) ref=$OPTARG ;;
+	*) exit 2 ;;
+	esac
+done
+shift $((OPTIND - 1))
+[[ $# -eq 1 ]] || { echo "usage: dt-extend [-o OUTPUT] [-r REF] TARGET" >&2; exit 2; }
+target=$1
+
+here=${0%/*}
+dt=${DOUBLETAKE:-doubletake}
+
+# Report on stderr and, when nobody is watching a terminal, as a notification.
+msg() {
+	echo "dt-extend: $*" >&2 || true
+	if [[ ! -t 2 ]] && command -v notify-send >/dev/null; then
+		notify-send dt-extend "$*" || true
+	fi
+}
+
+# Geometry of $out as WxH+X+Y, empty if disconnected or disabled.
+geometry() {
+	xrandr --query | awk -v o="$out" '$1 == o && $2 == "connected" {
+		for (i = 3; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) { print $i; exit }
+	}'
+}
+
+primary() {
+	xrandr --query | awk '$2 == "connected" && $3 == "primary" { print $1; exit }'
+}
+
+command -v xrandr >/dev/null || { echo "dt-extend: xrandr not found" >&2; exit 1; }
+command -v "$dt" >/dev/null || { echo "dt-extend: doubletake not found (set DOUBLETAKE=/path)" >&2; exit 1; }
+[[ -z $(geometry) ]] || { echo "dt-extend: $out is already enabled" >&2; exit 1; }
+! pgrep -x doubletake >/dev/null || { echo "dt-extend: doubletake is already running" >&2; exit 1; }
+
+orig_primary=$(primary)
+pid='' applied='' res=''
+
+cleanup() {
+	local code=$?
+	set +e
+	trap '' INT TERM HUP
+
+	local now
+	now=$(geometry)
+	[[ -n $applied ]] && "$here/dt-pos" -o "$out" -r "$ref" save >/dev/null
+	if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+		kill -TERM "$pid"
+		for _ in {1..50}; do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 0.1
+		done
+		kill -KILL "$pid" 2>/dev/null
+		wait "$pid" 2>/dev/null
+	fi
+	xrandr --output "$out" --off
+	if [[ -n $orig_primary && $(primary) != "$orig_primary" ]]; then
+		xrandr --output "$orig_primary" --primary
+	fi
+	sudo -n "$here/dt-status" "$out" detect ||
+		msg "could not set $out status back to detect; run: echo detect | sudo tee /sys/class/drm/card*-$out/status"
+	if [[ -n $res && -n $now && ${now%%+*} != "$res" ]]; then
+		msg "$out was resized to ${now%%+*} during the session; rerun dt-res and dt-pos apply before the next one"
+	fi
+	if [[ -n $(geometry) ]]; then
+		msg "$out is still enabled; run: xrandr --output $out --off"
+		code=1
+	fi
+	exit "$code"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+sudo "$here/dt-status" "$out" on
+for _ in {1..10}; do
+	xrandr --output "$out" --auto 2>/dev/null || true
+	[[ -z $(geometry) ]] || break
+	sleep 0.3
+done
+[[ -n $(geometry) ]] || { echo "dt-extend: $out did not come up" >&2; exit 1; }
+
+res=$("$here/dt-res" -o "$out" "$target")
+side=$("$here/dt-pos" -o "$out" -r "$ref" apply)
+applied=1
+msg "$out extends the $side of $ref at $res"
+
+# Ctrl+C goes to doubletake alone: it shuts down cleanly, and a second signal
+# from us would make it exit without tearing down.
+trap '' INT
+"$dt" -target "$target" -x11-output "$out" <&0 &
+pid=$!
+# Under set -e a failing wait exits with doubletake's code, which cleanup keeps.
+wait "$pid"
