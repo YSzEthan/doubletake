@@ -10,9 +10,8 @@
 # Steps: dt-status on, enable OUT, dt-res, dt-pos apply, run doubletake
 # -x11-output OUT. On any exit (normal, Ctrl+C, TERM, HUP, doubletake dying)
 # it saves the side, stops doubletake, turns OUT off, restores primary and
-# writes status back to detect. The status write uses sudo -n there, so when
-# there is no terminal to ask for a password (closed terminal, menu launch)
-# status stays "on" until #7 lets it run without one.
+# writes status back to detect. Without a terminal to ask for a password (menu
+# launch, closed terminal) the status writes need `sudo dt-setup` run once.
 #
 # kill -9 cannot be trapped. Undo by hand:
 #   xrandr --output DP-1 --off; echo detect | sudo tee /sys/class/drm/card*-DP-1/status
@@ -32,6 +31,9 @@ target=$1
 
 here=${0%/*}
 dt=${DOUBLETAKE:-doubletake}
+# The root-owned copy dt-setup authorizes in sudoers; else the one next to us.
+st=/usr/local/libexec/doubletake/dt-status
+[[ -x $st ]] || st=$here/dt-status
 
 # Report on stderr and, when nobody is watching a terminal, as a notification.
 msg() {
@@ -81,8 +83,8 @@ cleanup() {
 	if [[ -n $orig_primary && $(primary) != "$orig_primary" ]]; then
 		xrandr --output "$orig_primary" --primary
 	fi
-	sudo -n "$here/dt-status" "$out" detect ||
-		msg "could not set $out status back to detect; run: echo detect | sudo tee /sys/class/drm/card*-$out/status"
+	sudo -n "$st" "$out" detect ||
+		msg "could not set $out status back to detect; run: sudo dt-setup -o $out, or: echo detect | sudo tee /sys/class/drm/card*-$out/status"
 	if [[ -n $res && -n $now && ${now%%+*} != "$res" ]]; then
 		msg "$out was resized to ${now%%+*} during the session; rerun dt-res and dt-pos apply before the next one"
 	fi
@@ -98,7 +100,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-sudo "$here/dt-status" "$out" on
+sudo "$st" "$out" on || { msg "cannot set $out status to on; run once: sudo dt-setup -o $out"; exit 1; }
 for _ in {1..10}; do
 	xrandr --output "$out" --auto 2>/dev/null || true
 	[[ -z $(geometry) ]] || break

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Let a user force-connect OUTPUT without a password, so dt-extend can start
+# from a menu with no terminal to ask in.
+# Usage: sudo dt-setup [-o OUTPUT] [-u USER]
+#   -o OUT   output dt-extend uses (default DP-1)
+#   -u USER  user allowed to run it (default: whoever ran sudo)
+#
+# Installs a root-owned copy of dt-status to /usr/local/libexec/doubletake and
+# a sudoers rule allowing only "dt-status OUT on" and "dt-status OUT detect".
+# Running it again replaces both. Remove with:
+#   sudo rm /etc/sudoers.d/doubletake /usr/local/libexec/doubletake/dt-status
+set -euo pipefail
+
+die() { echo "dt-setup: $*" >&2; exit 1; }
+
+out=DP-1 user=${SUDO_USER:-}
+while getopts o:u: opt; do
+	case $opt in
+	o) out=$OPTARG ;;
+	u) user=$OPTARG ;;
+	*) exit 2 ;;
+	esac
+done
+shift $((OPTIND - 1))
+[[ $# -eq 0 ]] || { echo "usage: sudo dt-setup [-o OUTPUT] [-u USER]" >&2; exit 2; }
+
+[[ $EUID -eq 0 ]] || die "run as root: sudo $0"
+# Both go into the sudoers rule verbatim; visudo checks syntax, not intent.
+[[ $out =~ ^[A-Za-z0-9-]+$ ]] || die "bad output name: $out"
+[[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || die "bad or missing user (use -u USER): $user"
+[[ $(id -u "$user" 2>/dev/null) =~ ^[1-9] ]] || die "$user is not an existing non-root user"
+
+src=${0%/*}/dt-status
+dir=/usr/local/libexec/doubletake
+rule=/etc/sudoers.d/doubletake
+[[ -f $src ]] || die "$src not found"
+
+# Whoever can write any directory on the path can swap the helper for a shell.
+install -d -m 0755 "${dir%/*}"
+for d in / /usr /usr/local "${dir%/*}"; do
+	[[ $(stat -c %u "$d") == 0 && -z $(find "$d" -maxdepth 0 -perm /022) ]] ||
+		die "$d must be owned by root and not group/world-writable"
+done
+install -d -o root -g root -m 0755 "$dir"
+install -o root -g root -m 0755 "$src" "$dir/dt-status"
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+printf '%s ALL=(root) NOPASSWD: %s %s on, %s %s detect\n' \
+	"$user" "$dir/dt-status" "$out" "$dir/dt-status" "$out" >"$tmp"
+visudo -cqf "$tmp" || die "generated rule failed visudo"
+install -o root -g root -m 0440 "$tmp" "$rule"
+
+echo "dt-setup: $user can now run 'sudo $dir/dt-status $out on|detect' without a password"
+echo "dt-setup: to remove: sudo rm $rule $dir/dt-status"
