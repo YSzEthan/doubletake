@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Force-connect or release a DRM output by writing its sysfs status file.
+# Usage: dt-status OUTPUT (on|detect)
+#   on      pretend a monitor is plugged in
+#   detect  go back to real hotplug detection
+#
+# Needs root. It does not call sudo itself, so a sudoers rule (#7) can
+# authorize this one file; keep the installed copy root-owned.
+set -euo pipefail
+
+[[ $# -eq 2 && $1 =~ ^[A-Za-z0-9-]+$ && ( $2 == on || $2 == detect ) ]] || { echo "usage: dt-status OUTPUT (on|detect)" >&2; exit 2; }
+out=$1 val=$2
+
+files=(/sys/class/drm/card*-"$out"/status)
+[[ ${#files[@]} -eq 1 && -e ${files[0]} ]] || { echo "dt-status: no unique status file for $out" >&2; exit 1; }
+echo "$val" >"${files[0]}"
