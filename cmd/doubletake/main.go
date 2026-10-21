@@ -57,6 +57,9 @@ func parsePortRange(s string) (int, int, error) {
 	return lo, hi, nil
 }
 
+// errCanvasProbed aborts SETUP once -probe-canvas has the receiver canvas.
+var errCanvasProbed = errors.New("canvas probed")
+
 func main() {
 	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
@@ -72,6 +75,7 @@ func main() {
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
+	probeCanvas := flag.Bool("probe-canvas", false, "Connect, print the receiver video canvas as WxH on stdout, and exit; implies -test and -no-audio")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	portRange := flag.String("port-range", "", "Local UDP port range for receiver timing/audio (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 3 ports.")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
@@ -82,6 +86,9 @@ func main() {
 	x11Output := flag.String("x11-output", "", "X11 output (xrandr name) to capture, e.g. DP-1; default is the primary output")
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
+	if *probeCanvas {
+		*testMode, *noAudio = true, true
+	}
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)
 	}
@@ -395,7 +402,12 @@ func main() {
 		liveVideoLead = 0
 		return fmt.Errorf("%w: %v", airplay.ErrAutomaticVideoCodecUnavailable, cause)
 	}
+	probedCanvas := ""
 	prepareVideo := func(width, height int, codec airplay.VideoCodec) (airplay.VideoPreparationResult, error) {
+		if *probeCanvas {
+			probedCanvas = fmt.Sprintf("%dx%d", width, height)
+			return airplay.VideoPreparationResult{}, errCanvasProbed
+		}
 		if capture != nil {
 			if codec == startedCodec {
 				if width != startedWidth || height != startedHeight {
@@ -463,6 +475,10 @@ func main() {
 			streamCfg.VideoCodec = startedCodec
 		}
 		session, err = client.SetupMirrorWithCalibratedVideoPreparation(ctx, streamCfg, prepareVideo)
+	}
+	if errors.Is(err, errCanvasProbed) {
+		fmt.Println(probedCanvas)
+		return
 	}
 	if err != nil {
 		log.Fatalf("mirror setup failed: %v", err)

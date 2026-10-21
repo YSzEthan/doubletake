@@ -58,6 +58,11 @@ simultaneous receiver. See
 .B FIREWALL
 below.
 .TP
+.B \-probe-canvas
+Connect, print the receiver video canvas as \fBWxH\fR on standard output and
+exit. Implies \fB\-test\fR and \fB\-no-audio\fR. A receiver that has not been
+paired shows a PIN, so pair once first or set \fBDOUBLETAKE_CODE\fR.
+.TP
 .B \-x11-output \fINAME\fR
 X11 only: capture the xrandr output NAME (for example \fBDP-1\fR) instead of the
 primary output. doubletake exits with an error if the output does not exist or

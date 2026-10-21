@@ -278,6 +278,7 @@ doubletake-ctl disconnect
 | `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |
 | `-no-audio` | false | Disable audio streaming |
 | `-test` | false | Use synthetic video source |
+| `-probe-canvas` | false | Connect, print the receiver video canvas as `WxH` and exit (implies `-test`, `-no-audio`). `scripts/dt-probe-canvas TARGET` wraps it with a per-target cache in `~/.cache/dt-extend/` (`-f` re-probes). Pair once first, or set `DOUBLETAKE_CODE`; without displays info the receiver reports doubletake's 1920x1080/1280x720 default |
 | `-x11-output` | primary | X11 only: capture the named xrandr output (e.g. `DP-1`) instead of the primary one. Fails if the output is missing or not active |
 | `-daemonize` | false | Run as background daemon with Unix socket control interface |
 | `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock` | Daemon control socket path |
