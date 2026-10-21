@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Place an X11 output next to a reference output and remember the side.
+# Usage: dt-pos [-o OUTPUT] [-r REF] (apply|save)
+#   apply   move OUTPUT to the saved side of REF (right when nothing valid is
+#           saved), moving REF too when OUTPUT goes left or above, then check
+#           the layout really came out that way
+#   save    read the current side of OUTPUT relative to REF and store it
+#   -o OUT  output to place (default DP-1)
+#   -r REF  reference output (default HDMI-1); not "primary", because
+#           Cinnamon changes primary behind our back
+#
+# Only the side (right|left|above|below) is stored, not coordinates: the
+# size of a force-connected output changes with the receiver (see dt-res),
+# and alignment along the shared edge is not kept. A diagonal position is
+# classified by the first matching side in the order right, left, above, below.
+# It lives in ~/.config, not ~/.cache: it is a user setting, not a cache.
+#
+# Call order for a session: enable the output, dt-res, then dt-pos apply.
+# The other way round, dt-res keeps the old position and grows the output in
+# place, over REF. Run save before the output is turned off.
+set -euo pipefail
+
+out=DP-1 ref=HDMI-1
+while getopts o:r: opt; do
+	case $opt in
+	o) out=$OPTARG ;;
+	r) ref=$OPTARG ;;
+	*) exit 2 ;;
+	esac
+done
+shift $((OPTIND - 1))
+[[ $# -eq 1 && ( $1 == apply || $1 == save ) ]] || { echo "usage: dt-pos [-o OUTPUT] [-r REF] (apply|save)" >&2; exit 2; }
+cmd=$1
+
+conf=${XDG_CONFIG_HOME:-$HOME/.config}/dt-extend/$out.pos
+
+# Geometry of output $1 as WxH+X+Y, empty if disconnected or disabled.
+geometry() {
+	xrandr --query | awk -v o="$1" '$1 == o && $2 == "connected" {
+		for (i = 3; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) { print $i; exit }
+	}'
+}
+
+# Side of $out relative to $ref, empty if they overlap.
+current_side() {
+	local o r
+	o=$(geometry "$out") r=$(geometry "$ref")
+	[[ -n $o ]] || { echo "dt-pos: $out is not connected and enabled" >&2; return 1; }
+	[[ -n $r ]] || { echo "dt-pos: $ref is not connected and enabled" >&2; return 1; }
+	echo "$o $r" | tr 'x+' '  ' | awk '{
+		ow = $1; oh = $2; ox = $3; oy = $4; rw = $5; rh = $6; rx = $7; ry = $8
+		if (ox >= rx + rw) print "right"
+		else if (ox + ow <= rx) print "left"
+		else if (oy + oh <= ry) print "above"
+		else if (oy >= ry + rh) print "below"
+	}'
+}
+
+case $cmd in
+save)
+	side=$(current_side)
+	[[ -n $side ]] || { echo "dt-pos: $out overlaps $ref, nothing saved" >&2; exit 1; }
+	mkdir -p "${conf%/*}"
+	printf '%s\n' "$side" >"$conf.tmp"
+	mv "$conf.tmp" "$conf"
+	echo "$side"
+	;;
+apply)
+	side=
+	{ read -r side <"$conf"; } 2>/dev/null || true
+	case $side in
+	right | left | above | below) ;;
+	*) side=right ;;
+	esac
+	# Fail on a missing REF before touching the layout.
+	current_side >/dev/null
+	echo "dt-pos: moving $out to the $side of $ref (changes the screen layout)" >&2
+	# xrandr --left-of/--above size the neighbour by the base mode, not by the
+	# --scale-from size, and would overlap; so place both outputs explicitly.
+	IFS='x+' read -r ow oh _ _ <<<"$(geometry "$out")"
+	IFS='x+' read -r rw rh rx ry <<<"$(geometry "$ref")"
+	ox=$rx oy=$ry nx=$rx ny=$ry
+	case $side in
+	right) ox=$((rx + rw)) ;;
+	below) oy=$((ry + rh)) ;;
+	left) nx=$((rx + ow)) ;;
+	above) ny=$((ry + oh)) ;;
+	esac
+	xrandr --output "$out" --pos "${ox}x$oy" --output "$ref" --pos "${nx}x$ny"
+	got=$(current_side) || got=
+	if [[ $got != "$side" ]]; then
+		echo "dt-pos: $out is ${got:-overlapping} $ref, wanted $side" >&2
+		exit 1
+	fi
+	echo "$side"
+	;;
+esac
