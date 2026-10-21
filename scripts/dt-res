@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Set the resolution of a force-connected X11 output (default DP-1).
+# Usage: dt-res [-o OUTPUT] (-r WxH | TARGET)
+#   -r WxH  use this resolution; otherwise the receiver canvas of TARGET
+#           (via dt-probe-canvas)
+#   -o OUT  output to configure (default DP-1)
+# Env:    DT_BASE_MODE  mode really sent to the output (default 1280x720R)
+#
+# Only for outputs with no physical sink: the output is driven at a low
+# pixel clock base mode and xrandr --scale-from stretches it to WxH, so the
+# X framebuffer (what ximagesrc captures) is WxH. Using it on a real display
+# would downscale that display. If WxH differs in aspect from the base mode
+# the physical signal is stretched, but the framebuffer is not; doubletake
+# adds the letterbox bars itself.
+#
+# The output must already be connected and enabled; its position is kept.
+# A running doubletake keeps its old crop region: restart it afterwards.
+set -euo pipefail
+
+out=DP-1 res=
+while getopts o:r: opt; do
+	case $opt in
+	o) out=$OPTARG ;;
+	r) res=$OPTARG ;;
+	*) exit 2 ;;
+	esac
+done
+shift $((OPTIND - 1))
+if [[ -n $res ]]; then
+	[[ $# -eq 0 ]] || { echo "usage: dt-res [-o OUTPUT] (-r WxH | TARGET)" >&2; exit 2; }
+else
+	[[ $# -eq 1 ]] || { echo "usage: dt-res [-o OUTPUT] (-r WxH | TARGET)" >&2; exit 2; }
+	res=$("${0%/*}/dt-probe-canvas" "$1")
+fi
+[[ $res =~ ^[0-9]+x[0-9]+$ ]] || { echo "dt-res: bad resolution: $res" >&2; exit 2; }
+
+base=${DT_BASE_MODE:-1280x720R}
+base_w=${base%%x*}
+base_h=${base#*x}
+base_h=${base_h%R}
+
+# Current geometry of $out: WxH+X+Y, empty if disconnected or disabled.
+geometry() {
+	xrandr --query | awk -v o="$out" '$1 == o && $2 == "connected" {
+		for (i = 3; i <= NF; i++) if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) { print $i; exit }
+	}'
+}
+
+# Mode names listed under $out.
+output_modes() {
+	xrandr --query | awk -v o="$out" '
+		$1 == o { in_out = 1; next }
+		/^[^ ]/ { in_out = 0 }
+		in_out { print $1 }'
+}
+
+cur=$(geometry)
+[[ -n $cur ]] || { echo "dt-res: $out is not connected and enabled" >&2; exit 1; }
+pos=${cur#*+}
+
+# The mode may already exist; only the addmode and the final check must succeed.
+read -ra modeline < <(cvt -r "$base_w" "$base_h" | sed -n 's/^Modeline "[^"]*" *//p')
+xrandr --newmode "$base" "${modeline[@]}" 2>/dev/null || true
+if ! output_modes | grep -qxF "$base"; then
+	xrandr --addmode "$out" "$base"
+fi
+
+xrandr --output "$out" --mode "$base" --scale-from "$res" --pos "${pos/+/x}"
+
+got=$(geometry)
+if [[ ${got%%+*} != "$res" ]]; then
+	echo "dt-res: $out is ${got:-off}, wanted $res" >&2
+	exit 1
+fi
+
+if pgrep -x doubletake >/dev/null; then
+	echo "dt-res: doubletake is running; restart it to capture $res" >&2
+fi
+echo "$res"
